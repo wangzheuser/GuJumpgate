@@ -27,6 +27,8 @@
   const HOSTED_CHECKOUT_PAYPAL_DEFAULT_PHONE = '1234567890';
   const HOSTED_CHECKOUT_SUCCESS_URL_PATTERN = /^https:\/\/(?:chatgpt\.com|www\.chatgpt\.com|chat\.openai\.com)\/(?:backend-api\/)?payments\/success(?:[/?#]|$)/i;
   const HOSTED_CHECKOUT_SMS_POOL_SEPARATOR = '----';
+  const HOSTED_CHECKOUT_SAMPLE_PHONE = '1234567890';
+  const HOSTED_CHECKOUT_SAMPLE_VERIFICATION_URL = 'https://mail.test.com/api/text-relay/eca_tr_xxxxxxxxx';
   const CHECKOUT_CONVERSION_PROXY_SETTINGS_SCOPE = 'regular';
   const CHECKOUT_CONVERSION_PROXY_BYPASS_LIST = ['<local>', 'localhost', '127.0.0.1'];
   const CHECKOUT_CONVERSION_PROXY_TARGET_HOST_PATTERNS = [
@@ -496,6 +498,11 @@ function FindProxyForURL(url, host) {
         : '';
     }
 
+    function isHostedCheckoutSampleEntry(phone = '', verificationUrl = '') {
+      return normalizeHostedCheckoutPoolPhone(phone) === HOSTED_CHECKOUT_SAMPLE_PHONE
+        && normalizeHostedCheckoutPoolUrl(verificationUrl) === HOSTED_CHECKOUT_SAMPLE_VERIFICATION_URL;
+    }
+
     function parseHostedCheckoutSmsPoolEntries(text = '') {
       const lines = normalizeHostedCheckoutPoolText(text).split('\n').filter(Boolean);
       const seen = new Set();
@@ -514,7 +521,7 @@ function FindProxyForURL(url, host) {
           index += 1;
         }
         const key = buildHostedCheckoutPoolKey(phone, verificationUrl);
-        if (!phone || !verificationUrl || !key || seen.has(key)) {
+        if (!phone || !verificationUrl || !key || seen.has(key) || isHostedCheckoutSampleEntry(phone, verificationUrl)) {
           continue;
         }
         seen.add(key);
@@ -598,6 +605,25 @@ function FindProxyForURL(url, host) {
           }
           return left.index - right.index;
         })[0] || null;
+    }
+
+    function buildHostedCheckoutConfigDiagnostics({
+      state = {},
+      stored = {},
+      poolEntries = [],
+      selectedSmsEntry = null,
+    } = {}) {
+      return {
+        stateHostedCheckoutPhoneNumber: String(state?.hostedCheckoutPhoneNumber || '').trim(),
+        localHostedCheckoutPhoneNumber: String(stored?.hostedCheckoutPhoneNumber || '').trim(),
+        stateHostedCheckoutVerificationUrl: String(state?.hostedCheckoutVerificationUrl || '').trim(),
+        localHostedCheckoutVerificationUrl: String(stored?.hostedCheckoutVerificationUrl || '').trim(),
+        stateHostedCheckoutSmsPoolTextLines: parseHostedCheckoutSmsPoolEntries(state?.hostedCheckoutSmsPoolText || '').length,
+        localHostedCheckoutSmsPoolTextLines: parseHostedCheckoutSmsPoolEntries(stored?.hostedCheckoutSmsPoolText || '').length,
+        effectiveHostedSmsPoolEntries: Array.isArray(poolEntries) ? poolEntries.length : 0,
+        selectedHostedSmsPoolPhone: String(selectedSmsEntry?.phone || '').trim(),
+        selectedHostedSmsPoolVerificationUrl: String(selectedSmsEntry?.verificationUrl || '').trim(),
+      };
     }
 
     async function applyHostedCheckoutRuntimePatch(patch = {}) {
@@ -699,7 +725,6 @@ function FindProxyForURL(url, host) {
       ).trim() || String(
         stored?.hostedCheckoutVerificationUrl
         || state?.hostedCheckoutVerificationUrl
-        || HOSTED_CHECKOUT_VERIFICATION_CODE_ENDPOINT
         || ''
       ).trim();
       const phone = String(
@@ -713,18 +738,24 @@ function FindProxyForURL(url, host) {
       ).trim() || String(
         stored?.hostedCheckoutPhoneNumber
         || state?.hostedCheckoutPhoneNumber
-        || HOSTED_CHECKOUT_PAYPAL_DEFAULT_PHONE
         || ''
       ).trim();
       const verificationPopupDelaySeconds = normalizeHostedCheckoutVerificationPopupDelaySeconds(
         stored?.hostedCheckoutVerificationPopupDelaySeconds ?? state?.hostedCheckoutVerificationPopupDelaySeconds
       );
+      const diagnostics = buildHostedCheckoutConfigDiagnostics({
+        state,
+        stored,
+        poolEntries,
+        selectedSmsEntry,
+      });
       return {
         verificationUrl,
         verificationPopupDelaySeconds,
         phone,
         hostedCheckoutCurrentSmsEntry: selectedSmsEntry,
         hostedCheckoutUsesSmsPool: Boolean(selectedSmsEntry),
+        diagnostics,
       };
     }
 
@@ -911,7 +942,7 @@ function FindProxyForURL(url, host) {
       return {
         email: buildHostedCheckoutRandomEmail(),
         password: buildHostedCheckoutRandomPassword(),
-        phone: String(config?.phone || HOSTED_CHECKOUT_PAYPAL_DEFAULT_PHONE || '').trim(),
+        phone: String(config?.phone || '').trim(),
         firstName: 'James',
         lastName: 'Smith',
         fullName: 'James Smith',
@@ -1212,7 +1243,9 @@ function FindProxyForURL(url, host) {
 
         if (isPayPalHermesUrl(currentUrl)) {
           await addLog(`步骤 6：检测到 PayPal Hermes 复核页（${currentUrl}），按油猴脚本方式直接等待并点击 Agree and Continue...`, 'info');
-          await runHostedCheckoutPayPalStep(tabId, {});
+          await runHostedCheckoutPayPalStep(tabId, {
+            ...guestProfile,
+          });
           await sleepWithStop(1000);
           continue;
         }
@@ -1223,6 +1256,7 @@ function FindProxyForURL(url, host) {
           await waitForHostedCheckoutVerificationPopupDelay();
           const verificationCode = await pollHostedCheckoutVerificationCode();
           await runHostedCheckoutPayPalStep(tabId, {
+            ...guestProfile,
             verificationCode,
           });
           await sleepWithStop(1000);
@@ -1232,6 +1266,7 @@ function FindProxyForURL(url, host) {
         if (pageState.hostedStage === 'pay_login') {
           await addLog('步骤 6：检测到 PayPal hosted checkout 登录页，正在填写邮箱并继续...', 'info');
           await runHostedCheckoutPayPalStep(tabId, {
+            ...guestProfile,
             email: guestProfile.email,
           });
           await sleepWithStop(1000);
@@ -1259,7 +1294,9 @@ function FindProxyForURL(url, host) {
 
         if (pageState.hostedStage === 'review_consent') {
           await addLog('步骤 6：检测到 PayPal hosted checkout 账单确认页，正在点击继续...', 'info');
-          await runHostedCheckoutPayPalStep(tabId, {});
+          await runHostedCheckoutPayPalStep(tabId, {
+            ...guestProfile,
+          });
           await sleepWithStop(1000);
           continue;
         }
@@ -1278,6 +1315,7 @@ function FindProxyForURL(url, host) {
         ensureCurrentSmsEntry: true,
       });
       const address = await fetchHostedCheckoutAddress();
+      await addLog(`步骤 6：hosted checkout 配置快照：${JSON.stringify(runtimeConfig?.diagnostics || {})}`, 'info');
       await addLog(`步骤 6：hosted checkout 初始电话配置为 ${runtimeConfig.phone || '(空)'}。`, 'info');
       await addLog(`步骤 6：hosted checkout 地址数据：${JSON.stringify(address)}`, 'info');
       const guestProfile = buildHostedCheckoutGuestProfile(address, runtimeConfig);

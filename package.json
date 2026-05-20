@@ -1,8 +1,5 @@
 {
   "name": "gujumpgate",
   "license": "MIT",
-  "private": true,
-  "scripts": {
-    "test": "node --test tests/*.test.js"
-  }
+  "private": true
 }

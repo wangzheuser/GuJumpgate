@@ -2977,12 +2977,65 @@ function normalizeHostedCheckoutPhoneValue(value = '') {
   return String(value || '').trim();
 }
 
-function normalizeHostedCheckoutSmsPoolTextValue(value = '') {
-  return String(value || '')
+function normalizeHostedCheckoutPoolUrlValue(value = '') {
+  const rawValue = String(value || '').trim();
+  if (!rawValue) {
+    return '';
+  }
+  try {
+    const parsed = new URL(rawValue);
+    parsed.searchParams.delete('t');
+    return parsed.toString();
+  } catch {
+    return rawValue
+      .replace(/([?&])t=\d+(?=(&|$))/i, '$1')
+      .replace(/[?&]$/g, '');
+  }
+}
+
+function isHostedCheckoutSamplePoolEntry(phone = '', verificationUrl = '') {
+  return normalizeHostedCheckoutPhoneValue(phone) === '1234567890'
+    && normalizeHostedCheckoutPoolUrlValue(verificationUrl) === 'https://mail.test.com/api/text-relay/eca_tr_xxxxxxxxx';
+}
+
+function parseHostedCheckoutSmsPoolEntries(value = '') {
+  const separator = '----';
+  const lines = String(value || '')
     .replace(/\r/g, '')
     .split('\n')
     .map((line) => line.trim())
-    .filter(Boolean)
+    .filter(Boolean);
+  const seen = new Set();
+  const entries = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const separatorIndex = line.indexOf(separator);
+    const hasSeparator = separatorIndex > 0;
+    const phone = hasSeparator
+      ? normalizeHostedCheckoutPhoneValue(line.slice(0, separatorIndex))
+      : normalizeHostedCheckoutPhoneValue(line);
+    const verificationUrl = hasSeparator
+      ? normalizeHostedCheckoutPoolUrlValue(line.slice(separatorIndex + separator.length))
+      : normalizeHostedCheckoutPoolUrlValue(lines[index + 1] || '');
+    if (!hasSeparator && verificationUrl) {
+      index += 1;
+    }
+    const key = phone && verificationUrl ? `${phone}${separator}${verificationUrl}` : '';
+    if (!phone || !verificationUrl || !key || seen.has(key) || isHostedCheckoutSamplePoolEntry(phone, verificationUrl)) {
+      continue;
+    }
+    seen.add(key);
+    entries.push({
+      phone,
+      verificationUrl,
+    });
+  }
+  return entries;
+}
+
+function normalizeHostedCheckoutSmsPoolTextValue(value = '') {
+  return parseHostedCheckoutSmsPoolEntries(value)
+    .map((entry) => `${entry.phone}----${entry.verificationUrl}`)
     .join('\n');
 }
 
@@ -10044,14 +10097,9 @@ function applySettingsState(state) {
   }
   if (typeof inputHostedCheckoutSmsPool !== 'undefined' && inputHostedCheckoutSmsPool) {
     const restoredHostedPoolText = normalizeHostedCheckoutSmsPoolTextValue(state?.hostedCheckoutSmsPoolText || '');
-    const fallbackHostedPhone = normalizeHostedCheckoutPhoneValue(state?.hostedCheckoutPhoneNumber || '');
-    const fallbackHostedUrl = normalizeHostedCheckoutVerificationUrlValue(state?.hostedCheckoutVerificationUrl || '');
-    inputHostedCheckoutSmsPool.value = restoredHostedPoolText || (
-      fallbackHostedPhone && fallbackHostedUrl
-        ? `${fallbackHostedPhone}\n${fallbackHostedUrl}`
-        : ''
-    );
+    inputHostedCheckoutSmsPool.value = restoredHostedPoolText;
   }
+  validateHostedCheckoutContactConfig();
   if (typeof inputOAuthFlowTimeoutEnabled !== 'undefined' && inputOAuthFlowTimeoutEnabled) {
     inputOAuthFlowTimeoutEnabled.checked = state?.oauthFlowTimeoutEnabled !== undefined
       ? Boolean(state.oauthFlowTimeoutEnabled)
@@ -12757,6 +12805,7 @@ const hostedSmsPoolManager = window.SidepanelHostedSmsPoolManager?.createHostedS
         inputHostedCheckoutSmsPool.value = normalized;
       }
       syncLatestState({ hostedCheckoutSmsPoolText: normalized });
+      validateHostedCheckoutContactConfig();
     },
     getUsage: () => latestState?.hostedCheckoutSmsPoolUsage || {},
     setUsage: (usage) => {
@@ -12781,6 +12830,7 @@ const hostedSmsPoolManager = window.SidepanelHostedSmsPoolManager?.createHostedS
         hostedCheckoutVerificationUrl: '',
         hostedCheckoutPhoneNumber: '',
       });
+      validateHostedCheckoutContactConfig();
     },
   },
   constants: {
@@ -12882,6 +12932,59 @@ function validateLocalCpaJsonPluginDir(options = {}) {
     valid,
     required,
     pluginDir,
+  };
+}
+
+function validateHostedCheckoutContactConfig(options = {}) {
+  const paymentMethod = typeof getSelectedPlusPaymentMethod === 'function'
+    ? getSelectedPlusPaymentMethod(latestState)
+    : 'paypal';
+  const plusModeEnabled = typeof inputPlusModeEnabled !== 'undefined' && inputPlusModeEnabled
+    ? Boolean(inputPlusModeEnabled.checked)
+    : Boolean(latestState?.plusModeEnabled);
+  const poolText = normalizeHostedCheckoutSmsPoolTextValue(inputHostedCheckoutSmsPool?.value || latestState?.hostedCheckoutSmsPoolText || '');
+  const phone = normalizeHostedCheckoutPhoneValue(inputHostedCheckoutPhone?.value || '');
+  const verificationUrl = normalizeHostedCheckoutVerificationUrlValue(inputHostedCheckoutVerificationUrl?.value || '');
+  const required = plusModeEnabled && paymentMethod === 'paypal' && !poolText;
+  const missingPhone = required && !phone;
+  const missingVerificationUrl = required && !verificationUrl;
+  const valid = !missingPhone && !missingVerificationUrl;
+  const message = (() => {
+    if (!required || valid) {
+      return '';
+    }
+    if (missingPhone && missingVerificationUrl) {
+      return '当前 Hosted 接码池为空，请先填写 PayPal 电话(不带+1) 和 验证码接口，或导入 Hosted 接码池。';
+    }
+    if (missingPhone) {
+      return '当前 Hosted 接码池为空，请先填写 PayPal 电话(不带+1)，或导入 Hosted 接码池。';
+    }
+    return '当前 Hosted 接码池为空，请先填写验证码接口，或导入 Hosted 接码池。';
+  })();
+
+  if (inputHostedCheckoutPhone) {
+    inputHostedCheckoutPhone.classList.toggle('is-invalid', missingPhone);
+    inputHostedCheckoutPhone.title = missingPhone ? message : '';
+  }
+  if (inputHostedCheckoutVerificationUrl) {
+    inputHostedCheckoutVerificationUrl.classList.toggle('is-invalid', missingVerificationUrl);
+    inputHostedCheckoutVerificationUrl.title = missingVerificationUrl ? message : '';
+  }
+
+  if (options.focusOnError && !valid) {
+    if (missingPhone) {
+      inputHostedCheckoutPhone?.focus?.();
+    } else if (missingVerificationUrl) {
+      inputHostedCheckoutVerificationUrl?.focus?.();
+    }
+  }
+
+  return {
+    valid,
+    required,
+    missingPhone,
+    missingVerificationUrl,
+    message,
   };
 }
 
@@ -13212,6 +13315,12 @@ stepsList?.addEventListener('click', async (event) => {
     }
     await persistCurrentSettingsForAction();
     const gpcCreateStep = getStepIdByKeyForCurrentMode('plus-checkout-create') || 6;
+    if (step === gpcCreateStep) {
+      const hostedCheckoutValidation = validateHostedCheckoutContactConfig({ focusOnError: true });
+      if (!hostedCheckoutValidation.valid) {
+        throw new Error(hostedCheckoutValidation.message || 'Hosted checkout 配置不完整。');
+      }
+    }
     if (step === gpcCreateStep && !(await ensureGpcApiKeyReadyForStart())) {
       return;
     }
@@ -13518,6 +13627,11 @@ async function startAutoRunFromCurrentSettings() {
     clearPendingAutoRunStartRunCount();
     inputLocalCpaJsonPluginDir?.focus?.();
     throw new Error('当前导出至为本地CPA JSON，请先填写插件目录。');
+  }
+  const hostedCheckoutValidation = validateHostedCheckoutContactConfig({ focusOnError: true });
+  if (!hostedCheckoutValidation.valid) {
+    clearPendingAutoRunStartRunCount();
+    throw new Error(hostedCheckoutValidation.message || 'Hosted checkout 配置不完整。');
   }
   if (!(await ensureGpcApiKeyReadyForStart())) {
     clearPendingAutoRunStartRunCount();
@@ -13851,6 +13965,7 @@ inputPlusModeEnabled?.addEventListener('change', () => {
     signupMethod: stepDefinitionState.signupMethod,
     plusAccountAccessStrategy: stepDefinitionState.plusAccountAccessStrategy,
   });
+  validateHostedCheckoutContactConfig();
   markSettingsDirty(true);
   saveSettings({ silent: true }).catch(() => { });
 });
@@ -13879,6 +13994,7 @@ selectPlusPaymentMethod?.addEventListener('change', () => {
     signupMethod: stepDefinitionState.signupMethod,
     plusAccountAccessStrategy: stepDefinitionState.plusAccountAccessStrategy,
   });
+  validateHostedCheckoutContactConfig();
   markSettingsDirty(true);
   saveSettings({ silent: true }).catch(() => { });
 });
@@ -13958,6 +14074,7 @@ selectPlusPaymentMethod?.addEventListener('change', () => {
     signupMethod: stepDefinitionState.signupMethod,
     plusAccountAccessStrategy: stepDefinitionState.plusAccountAccessStrategy,
   });
+  validateHostedCheckoutContactConfig();
   markSettingsDirty(true);
   saveSettings({ silent: true }).catch(() => { });
 });
@@ -15335,11 +15452,13 @@ inputHostedCheckoutVerificationPopupDelaySeconds?.addEventListener('blur', () =>
 
 inputHostedCheckoutVerificationUrl?.addEventListener('input', () => {
   setHostedCheckoutManualCodeDisplay('未获取');
+  validateHostedCheckoutContactConfig();
   markSettingsDirty(true);
   scheduleSettingsAutoSave();
 });
 inputHostedCheckoutVerificationUrl?.addEventListener('blur', () => {
   inputHostedCheckoutVerificationUrl.value = normalizeHostedCheckoutVerificationUrlValue(inputHostedCheckoutVerificationUrl.value);
+  validateHostedCheckoutContactConfig();
   saveSettings({ silent: true }).catch(() => { });
 });
 btnHostedCheckoutManualFetch?.addEventListener('click', () => {
@@ -15349,11 +15468,13 @@ btnHostedCheckoutManualFetch?.addEventListener('click', () => {
 });
 
 inputHostedCheckoutPhone?.addEventListener('input', () => {
+  validateHostedCheckoutContactConfig();
   markSettingsDirty(true);
   scheduleSettingsAutoSave();
 });
 inputHostedCheckoutPhone?.addEventListener('blur', () => {
   inputHostedCheckoutPhone.value = normalizeHostedCheckoutPhoneValue(inputHostedCheckoutPhone.value);
+  validateHostedCheckoutContactConfig();
   saveSettings({ silent: true }).catch(() => { });
 });
 
@@ -16372,13 +16493,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       if (message.payload.hostedCheckoutVerificationUrl !== undefined && inputHostedCheckoutVerificationUrl) {
         inputHostedCheckoutVerificationUrl.value = normalizeHostedCheckoutVerificationUrlValue(message.payload.hostedCheckoutVerificationUrl);
         setHostedCheckoutManualCodeDisplay('未获取');
+        validateHostedCheckoutContactConfig();
       }
       if (message.payload.hostedCheckoutPhoneNumber !== undefined && inputHostedCheckoutPhone) {
         inputHostedCheckoutPhone.value = normalizeHostedCheckoutPhoneValue(message.payload.hostedCheckoutPhoneNumber);
+        validateHostedCheckoutContactConfig();
       }
       if (message.payload.hostedCheckoutSmsPoolText !== undefined && inputHostedCheckoutSmsPool) {
         inputHostedCheckoutSmsPool.value = normalizeHostedCheckoutSmsPoolTextValue(message.payload.hostedCheckoutSmsPoolText);
         queueHostedSmsPoolRefresh();
+        validateHostedCheckoutContactConfig();
       }
       if (message.payload.hostedCheckoutSmsPoolUsage !== undefined || message.payload.hostedCheckoutCurrentSmsEntry !== undefined) {
         queueHostedSmsPoolRefresh();
